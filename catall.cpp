@@ -17,6 +17,9 @@
 
 namespace fs = std::filesystem;
 
+static constexpr const char* CATALL_VERSION = "1.0.3";
+static constexpr const char* CATALL_VENDOR  = "KocarTech";
+
 struct Options {
     fs::path dir = ".";
 
@@ -313,6 +316,7 @@ Options:
 
       --list-extcols           Show available extension collections
   -h, --help                   Show help
+      --version                Show version
 
 Built-in extension collections:
   cpp, python, php, nodejs, web, java, go, rust, dotnet, ruby, shell, config
@@ -461,6 +465,13 @@ static Options parse_args(
             usage();
             std::exit(0);
         }
+		else if (a == "--version") {
+			std::cout
+				<< "catall "
+				<< CATALL_VERSION
+				<< " (" << CATALL_VENDOR << ")\n";
+			std::exit(0);
+		}
         else if (a == "--list-extcols") {
             for (const auto& [name, exts] : collections) {
                 std::cout << name << ": ";
