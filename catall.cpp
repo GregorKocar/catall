@@ -11,6 +11,9 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include <unistd.h>
+#include <limits.h>
+#include <optional>
 
 namespace fs = std::filesystem;
 
@@ -51,6 +54,29 @@ struct Options {
     std::vector<std::string> extcols;
     std::vector<std::string> excludes;
 };
+
+static std::optional<fs::path> stdout_target_file() {
+    char buf[PATH_MAX];
+
+    ssize_t len = readlink("/proc/self/fd/1", buf, sizeof(buf) - 1);
+
+    if (len <= 0)
+        return std::nullopt;
+
+    buf[len] = '\0';
+
+    std::error_code ec;
+
+    fs::path p = fs::canonical(buf, ec);
+
+    if (ec)
+        return std::nullopt;
+
+    if (!fs::is_regular_file(p))
+        return std::nullopt;
+
+    return p;
+}
 
 static std::string trim(std::string s) {
     auto ns = [](unsigned char c) { return !std::isspace(c); };
@@ -817,63 +843,68 @@ int main(int argc, char** argv) {
 
     fs::path root;
 
-	try {
-		root = fs::canonical(opt.dir);
-	} catch (const fs::filesystem_error& e) {
-		if (!opt.quiet) {
-			std::cerr << "Could not resolve directory: " << opt.dir << ": " << e.what() << "\n";
-		}
+    try {
+        root = fs::canonical(opt.dir);
+    } catch (const fs::filesystem_error& e) {
+        if (!opt.quiet) {
+            std::cerr << "Could not resolve directory: " << opt.dir << ": " << e.what() << "\n";
+        }
 
-		return 1;
-	}
+        return 1;
+    }
 
-	std::vector<std::string> gitignore_patterns;
+    auto stdout_file = stdout_target_file();
 
-	if (opt.use_gitignore) {
-		gitignore_patterns = load_gitignore_patterns(root);
-	}
+    std::vector<std::string> gitignore_patterns;
 
-	fs::directory_options dopt = fs::directory_options::skip_permission_denied;
+    if (opt.use_gitignore) {
+        gitignore_patterns = load_gitignore_patterns(root);
+    }
+
+    fs::directory_options dopt = fs::directory_options::skip_permission_denied;
+
     if (opt.follow_symlinks) {
         dopt |= fs::directory_options::follow_directory_symlink;
     }
 
     std::vector<fs::path> entries;
 
-	try {
-		if (opt.recursive) {
-			fs::recursive_directory_iterator it(root, dopt);
-			fs::recursive_directory_iterator end;
+    try {
+        if (opt.recursive) {
+            fs::recursive_directory_iterator it(root, dopt);
+            fs::recursive_directory_iterator end;
 
-			for (; it != end; ++it) {
-				fs::path p = it->path();
-				std::string rel = rel_string(p, root);
+            for (; it != end; ++it) {
+                fs::path p = it->path();
+                std::string rel = rel_string(p, root);
 
-				if (!opt.include_hidden && is_hidden_path(p, root)) {
-					if (it->is_directory()) {
-						it.disable_recursion_pending();
-					}
-					entries.push_back(p);
-					continue;
-				}
+                if (!opt.include_hidden && is_hidden_path(p, root)) {
+                    if (it->is_directory()) {
+                        it.disable_recursion_pending();
+                    }
 
-				if (opt.use_gitignore && gitignore_excluded(rel, gitignore_patterns)) {
-					if (it->is_directory()) {
-						it.disable_recursion_pending();
-					}
-					entries.push_back(p);
-					continue;
-				}
+                    entries.push_back(p);
+                    continue;
+                }
 
-				entries.push_back(p);
-			}
-		} else {
-			for (const auto& entry : fs::directory_iterator(root, dopt)) {
-				entries.push_back(entry.path());
-			}
-		}
-	} catch (const fs::filesystem_error& e) {
-	if (!opt.quiet) {
+                if (opt.use_gitignore && gitignore_excluded(rel, gitignore_patterns)) {
+                    if (it->is_directory()) {
+                        it.disable_recursion_pending();
+                    }
+
+                    entries.push_back(p);
+                    continue;
+                }
+
+                entries.push_back(p);
+            }
+        } else {
+            for (const auto& entry : fs::directory_iterator(root, dopt)) {
+                entries.push_back(entry.path());
+            }
+        }
+    } catch (const fs::filesystem_error& e) {
+        if (!opt.quiet) {
             std::cerr << "Filesystem traversal error: " << e.what() << "\n";
         }
 
@@ -887,20 +918,21 @@ int main(int argc, char** argv) {
             std::error_code ec;
 
             std::string rel = rel_string(p, root);
-			if (!opt.include_hidden && is_hidden_path(p, root)) {
-				print_skipped(opt, p, root, "hidden path");
-				continue;
-			}
 
-			if (opt.use_gitignore && gitignore_excluded(rel, gitignore_patterns)) {
-				print_skipped(opt, p, root, "gitignore");
-				continue;
-			}
-			
-			if (simple_excluded(rel, opt.excludes)) {
-				print_skipped(opt, p, root, "excluded path");
-				continue;
-			}
+            if (!opt.include_hidden && is_hidden_path(p, root)) {
+                print_skipped(opt, p, root, "hidden path");
+                continue;
+            }
+
+            if (opt.use_gitignore && gitignore_excluded(rel, gitignore_patterns)) {
+                print_skipped(opt, p, root, "gitignore");
+                continue;
+            }
+
+            if (simple_excluded(rel, opt.excludes)) {
+                print_skipped(opt, p, root, "excluded path");
+                continue;
+            }
 
             if (fs::is_directory(p, ec)) {
                 if (opt.dir_headers) {
@@ -915,40 +947,49 @@ int main(int argc, char** argv) {
                 continue;
             }
 
+            std::error_code out_ec;
+            fs::path canon = fs::canonical(p, out_ec);
+
+            if (!out_ec && stdout_file && canon == *stdout_file) {
+                print_skipped(opt, p, root, "stdout output file");
+                continue;
+            }
+
             std::string ext = file_extension_key(p);
 
             if (!allowed_exts.empty()) {
-				if (!allowed_exts.count(ext)) {
-					print_skipped(opt, p, root, "extension filter");
-					continue;
-				}
+                if (!allowed_exts.count(ext)) {
+                    print_skipped(opt, p, root, "extension filter");
+                    continue;
+                }
             }
 
             if (opt.max_size_enabled) {
                 auto size = fs::file_size(p, ec);
 
-				if (ec || size > opt.max_size) {
-					print_skipped(opt, p, root, "size limit");
-					continue;
-				}
+                if (ec || size > opt.max_size) {
+                    print_skipped(opt, p, root, "size limit");
+                    continue;
+                }
             }
 
             if (opt.text_only) {
-				if (binary_exts.count(ext)) {
-					print_skipped(opt, p, root, "binary extension");
-					continue;
-				}
+                if (binary_exts.count(ext)) {
+                    print_skipped(opt, p, root, "binary extension");
+                    continue;
+                }
 
-				if (!looks_text(p)) {
-					print_skipped(opt, p, root, "binary detected");
-					continue;
-				}
+                if (!looks_text(p)) {
+                    print_skipped(opt, p, root, "binary detected");
+                    continue;
+                }
             }
-			if (opt.limit_files_enabled &&
-				opt.files_printed >= opt.limit_files) {
-				std::cout << "==...MORE FILES...==\n";
-				break;
-			}
+
+            if (opt.limit_files_enabled && opt.files_printed >= opt.limit_files) {
+                std::cout << "==...MORE FILES...==\n";
+                break;
+            }
+
             print_header_line(opt, p, root, false);
 
             errno = 0;
@@ -968,18 +1009,16 @@ int main(int argc, char** argv) {
                 continue;
             }
 
-			copy_file_to_stdout_limited(in, opt);
+            copy_file_to_stdout_limited(in, opt);
 
-			std::cout << opt.separator;
+            std::cout << opt.separator;
 
-			opt.files_printed++;
-        }
-        catch (const fs::filesystem_error& e) {
+            opt.files_printed++;
+        } catch (const fs::filesystem_error& e) {
             if (!opt.quiet) {
                 std::cerr << "Filesystem error: " << p << ": " << e.what() << "\n";
             }
-        }
-        catch (const std::exception& e) {
+        } catch (const std::exception& e) {
             if (!opt.quiet) {
                 std::cerr << "Error processing: " << p << ": " << e.what() << "\n";
             }
