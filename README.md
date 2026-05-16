@@ -180,6 +180,7 @@ catall --include-hidden .
       --list-extcols           Show available extension collections
 
   -h, --help                   Show help
+      --version                Show version
 
 ```
 
