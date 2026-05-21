@@ -194,6 +194,10 @@ Package description:
 
 [https://repo.kocar.net/description/catall/](https://repo.kocar.net/description/catall/)
 
+## More
+
+More about project on: [https://gregor.kocar.net/software/catall-linux/](https://gregor.kocar.net/software/catall-linux/)
+
 ## License
 
 MIT License
